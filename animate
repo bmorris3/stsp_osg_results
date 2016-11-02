@@ -1,0 +1,1 @@
+convert -delay 10 *.png animation.gif

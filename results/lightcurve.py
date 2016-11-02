@@ -271,7 +271,7 @@ class LightCurve(object):
 class BestLightCurve(object):
     def __init__(self, path, transit_params=None):
         self.path = path
-        self.default_figsize = (12, 8)#(20, 8)
+        self.default_figsize = (10, 8)#(20, 8)
 
         times, fluxes_kepler, errors, fluxes_model, flags = np.loadtxt(path,
                                                                        unpack=True)
@@ -287,65 +287,69 @@ class BestLightCurve(object):
         self.model_lc = LightCurve(times=self.times, fluxes=fluxes_model)
         self.transit_params = transit_params
 
-    def plot_whole_lc(self):
-
-        # Whole light curve
-        fig, ax = plt.subplots(2, 1, figsize=self.default_figsize,
-                               sharex='col')
-        ax[0].plot_date(self.kepler_lc.times.plot_date, self.fluxes_kepler,
-                        'k.', label='Kepler')
-        ax[0].plot_date(self.model_lc.times.plot_date, self.fluxes_model,
-                        'r', label='STSP')
-        #ax[0].legend(loc='lower left')
-        ax[0].set(ylabel='Flux')
-
-        ax[1].plot_date(self.kepler_lc.times.plot_date,
-                        self.fluxes_kepler - self.fluxes_model, 'k.')
-        ax[1].set(ylabel='Residuals')
-        ax[1].axhline(0, color='r')
-
-        label_times = Time(ax[1].get_xticks(), format='plot_date')
-        ax[1].set_xticklabels([lt.strftime("%H:%M")
-                               for lt in label_times.datetime])
-
-        ax[1].set_xlabel('Time on {0} UTC'.format(label_times[0].datetime.date()))
-
-        ax[0].set_title(os.path.basename(self.path))
-
-        return fig, ax
-
 
     def plot_whole_lc(self):
 
         # Whole light curve
+
+        import seaborn as sns
+        sns.set(style='white')
 
         errorbar_color = '#b3b3b3'
+        fontsize = 16
 
         fig, ax = plt.subplots(2, 1, figsize=self.default_figsize,
                                sharex='col')
         ax[0].errorbar(self.kepler_lc.times.plot_date, self.fluxes_kepler,
                         self.kepler_lc.errors, fmt='.',
                         color='k', ecolor=errorbar_color, capsize=0, label='Kepler')
-        ax[0].plot(self.model_lc.times.plot_date, self.fluxes_model,
-                        'r', label='STSP')
-        ax[0].set(ylabel='Flux')
+        ax[0].plot(self.model_lc.times.plot_date, self.fluxes_model, 'r', label='STSP')
+        ax[0].set_ylabel('Flux', fontsize=fontsize)
 
         ax[1].errorbar(self.kepler_lc.times.plot_date,
-                        self.fluxes_kepler - self.fluxes_model, self.kepler_lc.errors,
-                        fmt='.', color='k', ecolor=errorbar_color, capsize=0)
-        ax[1].set(ylabel='Residuals')
+                       self.fluxes_kepler - self.fluxes_model, self.kepler_lc.errors,
+                       fmt='.', color='k', ecolor=errorbar_color, capsize=0)
+        ax[1].set_ylabel('Residuals', fontsize=fontsize)
         ax[1].axhline(0, color='r')
 
         label_times = Time(ax[1].get_xticks(), format='plot_date')
         ax[1].set_xticklabels([lt.strftime("%H:%M") for lt in label_times.datetime])
 
-        ax[1].set_xlabel('Time on {0} UTC'.format(label_times[0].datetime.date()))
+        ax[1].set_xlabel('Time on {0} UTC'.format(label_times[0].datetime.date()), fontsize=fontsize)
 
-        ax[0].set_title(os.path.basename(self.path))
+        ax[1].set_xlim([self.kepler_lc.times.plot_date.min(),
+                        self.kepler_lc.times.plot_date.max()])
 
-#        for l in ax[1].get_xticklabels():
-#            l.set_rotation(45)
-#            l.set_ha('right')
+        sns.despine()
+
+        return fig, ax
+
+    def plot_transit(self):
+
+        # Whole light curve
+
+        import seaborn as sns
+        sns.set(style='white')
+
+        errorbar_color = '#b3b3b3'
+        fontsize = 16
+
+        fig, ax = plt.subplots(1, figsize=(8, 5))
+        ax.errorbar(self.kepler_lc.times.plot_date, self.fluxes_kepler,
+                        self.kepler_lc.errors, fmt='.',
+                        color='k', ecolor=errorbar_color, capsize=0, label='Kepler')
+        ax.plot(self.model_lc.times.plot_date, self.fluxes_model, 'r', label='STSP')
+
+        label_times = Time(ax.get_xticks(), format='plot_date')
+        ax.set_xticklabels([lt.strftime("%H:%M") for lt in label_times.datetime])
+
+        ax.set_xlabel('Time on {0} UTC'.format(label_times[0].datetime.date()),
+                      fontsize=fontsize)
+        ax.set_ylabel('Flux', fontsize=fontsize)
+        ax.set_xlim([self.kepler_lc.times.plot_date.min(),
+                        self.kepler_lc.times.plot_date.max()])
+
+        sns.despine()
 
         return fig, ax
 
@@ -377,7 +381,6 @@ class BestLightCurve(object):
                                    scale_factor*model_transits[i].fluxes,
                               'r', label='STSP')
                 ax[0, i].set(yticks=[])
-
                 ax[1, i].axhline(0, color='r', lw=2)
 
                 ax[1, i].plot_date(kepler_transits[i].times.plot_date,

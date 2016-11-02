@@ -8,28 +8,46 @@ from matplotlib import pyplot as plt
 import astropy.units as u
 from astropy.constants import R_sun
 from astropy.coordinates import SphericalRepresentation
-from .lightcurve import LightCurve
+from .lightcurve import LightCurve, BestLightCurve
 import corner
 import h5py
 
 __all__ = ['MCMCResults']
 
 
+def load_best_light_curve(results_dir, window_ind, transit_params):
+
+    lc_paths = sorted(glob(os.path.join(results_dir, 'window{0:03d}/run???/*_lcbest.txt'
+                                                     .format(window_ind))))
+
+    print(lc_paths)
+    last_lc = BestLightCurve(lc_paths[-1] if isinstance(lc_paths, list) else lc_paths,
+                             transit_params=transit_params)
+    return last_lc
+
 class MCMCResults(object):
-    def __init__(self, radius=None, lat=None, lon=None, acceptance_rates=None,
-                 n_spots=None, burnin=None, window_ind=None):
+    def __init__(self, radius=None, theta=None, phi=None, acceptance_rates=None,
+                 n_spots=None, burnin=None, window_ind=None, light_curve=None,
+                 transit_params=None, chi2=None):
         self.radius = radius
-        self.lat = lat
-        self.lon = lon
+        self.theta = theta
+        self.phi = phi
         self.acceptance_rates = acceptance_rates
         self.n_spots = n_spots
         self.burnin = burnin
         self.window_ind = window_ind
+        self.transit_params = transit_params
+        self.light_curve = light_curve
+        self.chi2 = chi2
+
+        self.x = None
+        self.y = None
+        self.z = None
 
     @classmethod
-    def from_stsp(cls, results_dir, window_ind, burnin=0.8):
+    def from_stsp(cls, results_dir, window_ind, burnin=0.8, transit_params=None):
 
-        table = []
+        table = None
         chain_ind = []
         burnin = burnin
         acceptance_rates = []
@@ -37,49 +55,52 @@ class MCMCResults(object):
         paths = sorted(glob(os.path.join(results_dir,
                                          'window{0:03d}/run???/*_mcmc.txt'
                                          .format(window_ind))))
-
+        print(paths)
         for path in paths:
 
             results_file_size = os.stat(path).st_size
 
             if results_file_size > 0:
-                table = np.loadtxt(path)
-                print("Loading", path)
+                new = np.loadtxt(path)
 
-                n_walkers = len(np.unique(table[:, 0]))
-                n_accepted_steps = np.count_nonzero(table[:, 2] != 0)
-                n_steps_total = np.max(table[:, 2])
+                n_walkers = len(np.unique(new[:, 0]))
+                n_accepted_steps = np.count_nonzero(new[:, 2] != 0)
+                n_steps_total = np.max(new[:, 2])
                 acceptance_rates.append(n_accepted_steps /
                                              n_steps_total / n_walkers)
 
-                if len(table) == 0:
-                    table = table
+                if table is None:
+                    table = new.copy()
                 else:
-                    table = np.vstack([table, table])
+                    table = np.vstack([table, new])
 
-                chain_ind = np.concatenate([chain_ind, table[:, 0]])
+                chain_ind = np.concatenate([chain_ind, new[:, 0]])
 
         n_properties_per_spot = 3
         col_offset = 4
         n_spots = (table.shape[1] - col_offset)//n_properties_per_spot
 
+        chi2_col = 3
         radius_col = (col_offset + n_properties_per_spot *
                            np.arange(n_spots))
-        lat_col = (col_offset + 1 + n_properties_per_spot *
+        theta_col = (col_offset + 1 + n_properties_per_spot *
                         np.arange(n_spots))
-        lon_col = (col_offset + 2 + n_properties_per_spot *
+        phi_col = (col_offset + 2 + n_properties_per_spot *
                         np.arange(n_spots))
 
-        # Note: latitude is defined on (0, pi) rather than (-pi/2, pi/2)
         radius = table[:, radius_col]
-        lat = table[:, lat_col]
-        lon = table[:, lon_col]
+        theta = table[:, theta_col]
+        phi = table[:, phi_col]
+        chi2 = table[:, chi2_col]
 
         burnin_int = int(burnin*table.shape[0])
 
+        last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
+
         kwargs = dict(burnin=burnin, acceptance_rates=acceptance_rates,
-                      radius=radius, lat=lat, lon=lon, n_spots=n_spots,
-                      window_ind=window_ind)
+                      radius=radius, theta=theta, phi=phi, n_spots=n_spots,
+                      window_ind=window_ind, transit_params=transit_params,
+                      chi2=chi2, light_curve=last_lc)
 
         return cls(**kwargs)
 
@@ -93,7 +114,7 @@ class MCMCResults(object):
                                  "window{0:03}.hdf5".format(self.window_ind))
         f = h5py.File(file_path, 'w')
 
-        attrs_to_save = ['radius', 'lat', 'lon', 'acceptance_rates']
+        attrs_to_save = ['radius', 'theta', 'phi', 'acceptance_rates', 'chi2']
 
         for attr in attrs_to_save:
             f.create_dataset(attr, data=getattr(self, attr))
@@ -101,25 +122,29 @@ class MCMCResults(object):
 
 
     @classmethod
-    def from_hdf5(cls, results_dir, window_ind):
+    def from_hdf5(cls, results_dir, window_ind, transit_params=None):
 
-        saved_attrs = ['radius', 'lat', 'lon', 'acceptance_rates']
+        saved_attrs = ['radius', 'theta', 'phi', 'acceptance_rates', 'chi2']
 
         file_path = os.path.join(results_dir, 'hdf5',
                                  "window{0:03}.hdf5".format(window_ind))
 
         f = h5py.File(file_path, 'r')
 
-        kwargs = dict(window_ind=window_ind)
+        kwargs = dict(window_ind=window_ind, transit_params=transit_params)
         for attr in saved_attrs:
             kwargs[attr] = f[attr][:]
 
         f.close()
 
+        # Load last light curve
+        last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
+        kwargs['light_curve'] = last_lc
+
         return cls(**kwargs)
 
 
-    def plot_chains(self):
+    def plot_chains(self, burn_in=0):
 
         n_spots = self.radius.shape[1]
         fig, ax = plt.subplots(n_spots, 3, figsize=(16, 8))
@@ -128,38 +153,78 @@ class MCMCResults(object):
         low = 4
         high = 96
 
+        burnin_int = int(burn_in * self.radius.shape[0])
+
         for i in range(self.radius.shape[1]):
 
-            r_range = np.percentile(self.radius[self.burnin_int:, i], [low, high])
-            lat_range = np.percentile(self.lat[self.burnin_int:, i], [low, high])
-            lon_range = np.percentile(self.lon[self.burnin_int:, i], [low, high])
-            ax[i, 0].hist(self.radius[self.burnin_int:, i], n_bins, color='k',
+            r_range = np.percentile(self.radius[burnin_int:, i], [low, high])
+            theta_range = np.percentile(self.theta[burnin_int:, i], [low, high])
+            phi_range = np.percentile(self.phi[burnin_int:, i], [low, high])
+            ax[i, 0].hist(self.radius[burnin_int:, i], n_bins, color='k',
                           range=r_range)
-            ax[i, 1].hist(self.lat[self.burnin_int:, i], n_bins, color='k',
-                          range=lat_range)
-            ax[i, 2].hist(self.lon[self.burnin_int:, i], n_bins, color='k',
-                          range=lon_range)
+            ax[i, 1].hist(self.theta[burnin_int:, i], n_bins, color='k',
+                          range=theta_range)
+            ax[i, 2].hist(self.phi[burnin_int:, i], n_bins, color='k',
+                          range=phi_range)
             ax[i, 0].set_ylabel('Spot {0}'.format(i))
         ax[0, 0].set(title='Radius')
-        ax[0, 1].set(title='Latitude')
-        ax[0, 2].set(title='Longitude')
+        ax[0, 1].set(title='theta')
+        ax[0, 2].set(title='phi')
         ax[1, 0].set_xlabel('$R_s/R_\star$')
         ax[1, 1].set_xlabel('[radians]')
         ax[1, 2].set_xlabel('[radians]')
         fig.tight_layout()
 
-    def plot_each_spot(self):
-        #fig, ax = plt.subplots(5)
+
+    def plot_chains_cartesian(self, burn_in=0):
+
+        if self.x is None:
+            self.to_cartesian()
+
         n_spots = self.radius.shape[1]
-        burn_in_to_index = int(self.burnin*self.radius.shape[0])
+        fig, ax = plt.subplots(n_spots, 3, figsize=(16, 8))
+        n_bins = 30
+
+        low = 4
+        high = 96
+
+        burnin_int = int(burn_in * self.radius.shape[0])
+
+        for i in range(self.radius.shape[1]):
+
+            x_range = np.percentile(self.x[burnin_int:, i], [low, high])
+            y_range = np.percentile(self.y[burnin_int:, i], [low, high])
+            z_range = np.percentile(self.z[burnin_int:, i], [low, high])
+            ax[i, 0].hist(self.x[burnin_int:, i], n_bins, color='k',
+                          range=x_range)
+            ax[i, 1].hist(self.y[burnin_int:, i], n_bins, color='k',
+                          range=y_range)
+            ax[i, 2].hist(self.z[burnin_int:, i], n_bins, color='k',
+                          range=z_range)
+            ax[i, 0].set_ylabel('Spot {0}'.format(i))
+        ax[0, 0].set(title='x')
+        ax[0, 1].set(title='y')
+        ax[0, 2].set(title='z')
+        # ax[1, 0].set_xlabel('$R_s/R_\star$')
+        # ax[1, 1].set_xlabel('[radians]')
+        # ax[1, 2].set_xlabel('[radians]')
+        fig.tight_layout()
+
+
+    def plot_each_spot(self, burn_in=0):
+        #fig, ax = plt.subplots(5)
+        burnin_int = int(burn_in * self.radius.shape[0])
+
+        n_spots = self.radius.shape[1]
+        burn_in_to_index = int(burn_in*self.radius.shape[0])
         for i in range(n_spots):
             samples = np.array([self.radius[burn_in_to_index:, i],
-                                self.lon[burn_in_to_index:, i]]).T # self.lat[:, i],
-            corner.corner(samples)
+                                self.phi[burn_in_to_index:, i]]).T # self.theta[:, i],
+            corner.corner(samples, plot_contours=False)
 
     def plot_star(self, fade_out=True):
-        spots_spherical = SphericalRepresentation(self.lon*u.rad,
-                                                  (self.lat - np.pi/2)*u.rad,
+        spots_spherical = SphericalRepresentation(self.phi*u.rad,
+                                                  (self.theta - np.pi/2)*u.rad,
                                                   1*R_sun)
         self.spots_spherical = spots_spherical
         fig, ax = plot_star(spots_spherical, fade_out=fade_out)
@@ -185,6 +250,27 @@ class MCMCResults(object):
             ax.semilogx(range(len(chi2)), np.log10(chi2), alpha=0.6)
             ax.set(xlabel='Step', ylabel=r'$\log_{10} \, \chi^2$')
 
+    def to_cartesian(self):
+        i_s = np.radians(self.transit_params.inc_stellar)
+        lam = np.radians(self.transit_params.lam)
+
+        if self.x is None:
+            self.x = np.cos(self.phi) * np.sin(self.theta) #* np.sin(i_s) * np.sin(lam)
+            self.y = np.sin(self.phi) * np.sin(self.theta) #* np.sin(i_s) * np.cos(lam)
+            self.z = np.sin(self.theta) #* np.cos(i_s)
+
+    def plot_cartesian(self):
+        if self.x is None:
+            self.to_cartesian()
+
+        for i in range(self.x.shape[1]):
+            plt.plot(self.x[::50, i], self.y[::50, i], '.', alpha=0.2)
+
+
+        t = np.linspace(0, 2*np.pi, 100)
+        circle_x = np.cos(t)
+        circle_y = np.sin(t)
+        plt.plot(circle_x, circle_y, color='k')
 
 
 def plot_star(spots_spherical, fade_out=False):
@@ -250,34 +336,34 @@ def plot_star(spots_spherical, fade_out=False):
 
     # Plot gridlines
     n_gridlines = 9
-    print("lat grid spacing: {0} deg".format(180./(n_gridlines-1)))
+    print("theta grid spacing: {0} deg".format(180./(n_gridlines-1)))
     n_points = 35
     pi = np.pi
 
-    latitude_lines = SphericalRepresentation(np.linspace(0, 2*pi, n_points)[:, np.newaxis]*u.rad,
+    thetaitude_lines = SphericalRepresentation(np.linspace(0, 2*pi, n_points)[:, np.newaxis]*u.rad,
                                              np.linspace(-pi/2, pi/2, n_gridlines).T*u.rad,
                                              np.ones((n_points, 1))
                                              ).to_cartesian()
 
-    longitude_lines = SphericalRepresentation(np.linspace(0, 2*pi, n_gridlines)[:, np.newaxis]*u.rad,
+    phigitude_lines = SphericalRepresentation(np.linspace(0, 2*pi, n_gridlines)[:, np.newaxis]*u.rad,
                                               np.linspace(-pi/2, pi/2, n_points).T*u.rad,
                                               np.ones((n_gridlines, 1))
                                               ).to_cartesian()
 
-    for i in range(latitude_lines.shape[1]):
+    for i in range(thetaitude_lines.shape[1]):
         for axis in [positive_z, negative_z]:
-            axis.plot(latitude_lines.x[:, i], latitude_lines.y[:, i],
+            axis.plot(thetaitude_lines.x[:, i], thetaitude_lines.y[:, i],
                       ls=':', color='silver')
         for axis in [positive_x, negative_x, positive_y, negative_y]:
-            axis.plot(latitude_lines.y[:, i], latitude_lines.z[:, i],
+            axis.plot(thetaitude_lines.y[:, i], thetaitude_lines.z[:, i],
                       ls=':', color='silver')
 
-    for i in range(longitude_lines.shape[0]):
+    for i in range(phigitude_lines.shape[0]):
         for axis in [positive_z, negative_z]:
-            axis.plot(longitude_lines.y[i, :], longitude_lines.x[i, :],
+            axis.plot(phigitude_lines.y[i, :], phigitude_lines.x[i, :],
                     ls=':', color='silver')
         for axis in [positive_x, negative_x, positive_y, negative_y]:
-            axis.plot(longitude_lines.y[i, :], longitude_lines.z[i, :],
+            axis.plot(phigitude_lines.y[i, :], phigitude_lines.z[i, :],
                 ls=':', color='silver')
 
 

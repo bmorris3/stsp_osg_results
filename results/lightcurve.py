@@ -269,14 +269,16 @@ class LightCurve(object):
 
 
 class BestLightCurve(object):
-    def __init__(self, path, transit_params=None):
+    def __init__(self, path=None, transit_params=None, times=None, fluxes_kepler=None,
+                 errors=None, fluxes_model=None, flags=None):
         self.path = path
         self.default_figsize = (10, 8)#(20, 8)
 
-        times, fluxes_kepler, errors, fluxes_model, flags = np.loadtxt(path,
-                                                                       unpack=True)
+        if path is not None:
+            times, fluxes_kepler, errors, fluxes_model, flags = np.loadtxt(path,
+                                                                           unpack=True)
 
-        self.times = times if times.mean() > 2450000 else times + 2454833.
+        self.times = Time(times if times.mean() > 2450000 else times + 2454833., format='jd')
         self.fluxes_kepler = fluxes_kepler
         self.errors = errors
         self.fluxes_model = fluxes_model
@@ -286,7 +288,6 @@ class BestLightCurve(object):
                                     errors=errors)
         self.model_lc = LightCurve(times=self.times, fluxes=fluxes_model)
         self.transit_params = transit_params
-
 
     def plot_whole_lc(self):
 

@@ -11,6 +11,12 @@ from astropy.coordinates import SphericalRepresentation
 from .lightcurve import LightCurve, BestLightCurve
 import corner
 import h5py
+import pandas as pd
+
+# Import friedrich
+import sys
+sys.path.insert(0, '/astro/users/bmmorris/git/friedrich')
+from friedrich.stsp import STSP
 
 __all__ = ['MCMCResults']
 
@@ -25,13 +31,31 @@ def load_best_light_curve(results_dir, window_ind, transit_params):
                              transit_params=transit_params)
     return last_lc
 
+
+def chains_to_spot_params(radius_chains, theta_chains, phi_chains,
+                          best_chain_index, best_step_index_of_best_chain):
+    spot_params = []
+    for r, t, p in zip( radius_chains[best_chain_index][best_step_index_of_best_chain],
+                        theta_chains[best_chain_index][best_step_index_of_best_chain],
+                        phi_chains[best_chain_index][best_step_index_of_best_chain]):
+        spot_params.extend([r, t, p])
+    return spot_params
+
+
 class MCMCResults(object):
     def __init__(self, radius=None, theta=None, phi=None, acceptance_rates=None,
                  n_spots=None, burnin=None, window_ind=None, light_curve=None,
-                 transit_params=None, chi2=None):
+                 transit_params=None, chi2=None, radius_chains=None,
+                 theta_chains=None, phi_chains=None, chi2_chains=None):
         self.radius = radius
         self.theta = theta
         self.phi = phi
+
+        self.radius_chains = radius_chains
+        self.theta_chains = theta_chains
+        self.phi_chains = phi_chains
+        self.chi2_chains = chi2_chains
+
         self.acceptance_rates = acceptance_rates
         self.n_spots = n_spots
         self.burnin = burnin
@@ -39,6 +63,7 @@ class MCMCResults(object):
         self.transit_params = transit_params
         self.light_curve = light_curve
         self.chi2 = chi2
+        self._min_chi2_ind = None
 
         self.x = None
         self.y = None
@@ -55,6 +80,7 @@ class MCMCResults(object):
         paths = sorted(glob(os.path.join(results_dir,
                                          'window{0:03d}/run???/*_mcmc.txt'
                                          .format(window_ind))))
+
         print(paths)
         for path in paths:
 
@@ -95,7 +121,9 @@ class MCMCResults(object):
 
         burnin_int = int(burnin*table.shape[0])
 
-        last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
+        # last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
+
+        last_lc = None
 
         kwargs = dict(burnin=burnin, acceptance_rates=acceptance_rates,
                       radius=radius, theta=theta, phi=phi, n_spots=n_spots,
@@ -103,6 +131,113 @@ class MCMCResults(object):
                       chi2=chi2, light_curve=last_lc)
 
         return cls(**kwargs)
+
+    @classmethod
+    def from_stsp_cat(cls, results_dir, window_ind, burnin=0.8,
+                      transit_params=None):
+
+        table = None
+        chain_ind = []
+        burnin = burnin
+
+        chains_path = glob(os.path.join(results_dir,
+                                  'window{0:03d}_mcmc.txt'
+                                  .format(window_ind)))[0]
+
+        results_file_size = os.stat(chains_path).st_size
+
+        table = pd.read_csv(chains_path, header=None, delimiter=' ',
+                            skiprows=[0], error_bad_lines=False)
+        table = table.as_matrix(columns=table.columns)
+
+        # Toss nans:
+        table = table[np.logical_not(np.any(np.isnan(table), axis=1))]
+
+        n_walkers = len(np.unique(table[:, 0]))
+        n_accepted_steps = np.count_nonzero(table[:, 2] != 0)
+        n_steps_total = np.max(table[:, 2])
+        acceptance_rates = [n_accepted_steps / n_steps_total / n_walkers]
+
+        n_properties_per_spot = 3
+        col_offset = 4
+        n_spots = (table.shape[1] - col_offset) // n_properties_per_spot
+
+        chi2_col = 3
+        radius_col = (col_offset + n_properties_per_spot * np.arange(n_spots))
+        theta_col = (col_offset + 1 + n_properties_per_spot * np.arange(n_spots))
+        phi_col = (col_offset + 2 + n_properties_per_spot * np.arange(n_spots))
+
+        # Save flattened chains
+        radius = table[:, radius_col]
+        theta = table[:, theta_col]
+        phi = table[:, phi_col]
+        chi2 = table[:, chi2_col]
+
+        # Save un-flattened chains
+        radius_chains = []
+        theta_chains = []
+        phi_chains = []
+        chi2_chains = []
+
+        chain_inds = table[:, 0]
+        for i in range(n_walkers):
+            chain_i = chain_inds == i
+            radius_i = table[chain_i, :][:, radius_col]
+            theta_i = table[chain_i, :][:, theta_col]
+            phi_i = table[chain_i, :][:, phi_col]
+            chi2_i = table[chain_i, :][:, chi2_col]
+
+            radius_chains.append(radius_i)
+            theta_chains.append(theta_i)
+            phi_chains.append(phi_i)
+            chi2_chains.append(chi2_i)
+
+        burnin_int = int(burnin*table.shape[0])
+
+        # last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
+
+
+        lc_path = glob(os.path.join(results_dir, 'window{0:03d}.dat'
+                                    .format(window_ind)))[0]
+
+        times, fluxes, errors = np.loadtxt(lc_path, unpack=True)
+
+        ## calculate best transit model
+        min_chi2_chain = [min(chi2) for chi2 in chi2_chains]
+        best_chain_index = np.argmin(min_chi2_chain)
+        best_step_index_of_best_chain = np.argmin(chi2_chains[best_chain_index])
+
+        spot_params = chains_to_spot_params(radius_chains, theta_chains,
+                                            phi_chains, best_chain_index,
+                                            best_step_index_of_best_chain)
+        stsp = STSP(LightCurve(times=times, fluxes=fluxes, errors=errors),
+                    transit_params, spot_params)
+        t, f = stsp.stsp_lc(t_bypass=True)
+
+        last_lc = BestLightCurve(times=times, fluxes_kepler=fluxes, errors=errors, fluxes_model=f)
+
+
+        kwargs = dict(burnin=burnin, acceptance_rates=acceptance_rates,
+                      radius=radius, theta=theta, phi=phi, n_spots=n_spots,
+                      window_ind=window_ind, transit_params=transit_params,
+                      chi2=chi2, light_curve=last_lc,
+                      radius_chains=radius_chains, theta_chains=theta_chains,
+                      phi_chains=phi_chains, chi2_chains=chi2_chains)
+
+        return cls(**kwargs)
+
+
+    # @property
+    # def min_chi2_index(self):
+    #     if self._min_chi2_ind is None:
+    #         chi2_order = np.argsort(self.chi2)
+    #         index = 0
+    #         while np.any(np.isnan(self.radius[chi2_order[index], :])):
+    #             index += 0
+    #
+    #     self._min_chi2_ind = chi2_order[index]
+    #
+    #     return self._min_chi2_ind
 
     def to_hdf5(self, results_dir):
 
@@ -138,13 +273,13 @@ class MCMCResults(object):
         f.close()
 
         # Load last light curve
-        last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
-        kwargs['light_curve'] = last_lc
+        #last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
+        #kwargs['light_curve'] = last_lc
 
         return cls(**kwargs)
 
 
-    def plot_chains(self, burn_in=0):
+    def plot_chains_hist(self, burn_in=0):
 
         n_spots = self.radius.shape[1]
         fig, ax = plt.subplots(n_spots, 3, figsize=(16, 8))
@@ -175,6 +310,45 @@ class MCMCResults(object):
         ax[1, 2].set_xlabel('[radians]')
         fig.tight_layout()
 
+    def plot_chains(self, burn_in=0):
+
+        n_spots = self.radius.shape[1]
+        fig, ax = plt.subplots(n_spots, 3, figsize=(16, 8))
+        n_bins = 30
+
+        low = 4
+        high = 96
+
+        burnin_int = int(burn_in * self.radius.shape[0])
+
+        colors = ['b', 'g', 'r', 'm']
+
+        for i in range(len(self.radius_chains)):
+            for j in range(n_spots):
+                kwargs = dict(alpha=0.3, color=colors[j])
+
+                ax[j, 0].plot(self.radius_chains[i][:, j], **kwargs)
+                ax[j, 1].plot(self.theta_chains[i][:, j], **kwargs)
+                ax[j, 2].plot(self.phi_chains[i][:, j], **kwargs)
+                ax[j, 0].set_ylabel('Spot {0}'.format(j))
+
+        ax[0, 0].set(title='Radius')
+        ax[0, 1].set(title='theta')
+        ax[0, 2].set(title='phi')
+        ax[1, 0].set_xlabel('$R_s/R_\star$')
+        ax[1, 1].set_xlabel('[radians]')
+        ax[1, 2].set_xlabel('[radians]')
+
+        # Mark the maximum likelihood values
+        max_likelihood_ind = np.argmin(self.chi2)
+        for j in range(n_spots):
+            kwargs = dict(ls='--', lw=2, color=colors[j])
+
+            ax[j, 0].axhline(self.radius[max_likelihood_ind, j], **kwargs)
+            ax[j, 1].axhline(self.theta[max_likelihood_ind, j], **kwargs)
+            ax[j, 2].axhline(self.phi[max_likelihood_ind, j], **kwargs)
+
+        fig.tight_layout()
 
     def plot_chains_cartesian(self, burn_in=0):
 
@@ -259,18 +433,28 @@ class MCMCResults(object):
             self.y = np.sin(self.phi) * np.sin(self.theta) #* np.sin(i_s) * np.cos(lam)
             self.z = np.sin(self.theta) #* np.cos(i_s)
 
+            # self.x = np.cos(self.theta) * np.sin(self.phi) #* np.sin(i_s) * np.sin(lam)
+            # self.y = np.sin(self.theta) * np.sin(self.phi) #* np.sin(i_s) * np.cos(lam)
+            # self.z = np.sin(self.phi) #* np.cos(i_s)
+
+
     def plot_cartesian(self):
         if self.x is None:
             self.to_cartesian()
 
         for i in range(self.x.shape[1]):
-            plt.plot(self.x[::50, i], self.y[::50, i], '.', alpha=0.2)
+            #plt.plot(self.x[::50, i], self.y[::50, i], '.', alpha=0.2)
+            plt.plot(self.y[::50, i], -self.x[::50, i], '.', alpha=0.2)
 
 
         t = np.linspace(0, 2*np.pi, 100)
         circle_x = np.cos(t)
         circle_y = np.sin(t)
         plt.plot(circle_x, circle_y, color='k')
+
+    def get_best_radii(self):
+        min_chi2 = np.argmin(self.chi2)
+        return self.radius[min_chi2, :]
 
 
 def plot_star(spots_spherical, fade_out=False):

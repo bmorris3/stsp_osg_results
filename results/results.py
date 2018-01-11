@@ -15,7 +15,8 @@ import pandas as pd
 
 # Import friedrich
 import sys
-sys.path.insert(0, '/astro/users/bmmorris/git/friedrich')
+#sys.path.insert(0, '/astro/users/bmmorris/git/friedrich')
+sys.path.insert(0, '/Users/bmmorris/git/friedrich')
 from friedrich.stsp import STSP
 
 __all__ = ['MCMCResults']
@@ -46,7 +47,8 @@ class MCMCResults(object):
     def __init__(self, radius=None, theta=None, phi=None, acceptance_rates=None,
                  n_spots=None, burnin=None, window_ind=None, light_curve=None,
                  transit_params=None, chi2=None, radius_chains=None,
-                 theta_chains=None, phi_chains=None, chi2_chains=None):
+                 theta_chains=None, phi_chains=None, chi2_chains=None,
+                 spot_params=None):
         self.radius = radius
         self.theta = theta
         self.phi = phi
@@ -64,6 +66,7 @@ class MCMCResults(object):
         self.light_curve = light_curve
         self.chi2 = chi2
         self._min_chi2_ind = None
+        self.spot_params = spot_params
 
         self.x = None
         self.y = None
@@ -222,9 +225,100 @@ class MCMCResults(object):
                       window_ind=window_ind, transit_params=transit_params,
                       chi2=chi2, light_curve=last_lc,
                       radius_chains=radius_chains, theta_chains=theta_chains,
-                      phi_chains=phi_chains, chi2_chains=chi2_chains)
+                      phi_chains=phi_chains, chi2_chains=chi2_chains,
+                      spot_params=spot_params)
 
         return cls(**kwargs)
+
+    @classmethod
+    def from_stsp_local(cls, mcmc_path, lc_path, burnin=0.8,
+                      transit_params=None, window_ind=0):
+
+        table = None
+        chain_ind = []
+        burnin = burnin
+
+        chains_path = mcmc_path
+        results_file_size = os.stat(chains_path).st_size
+
+        table = pd.read_csv(chains_path, header=None, delimiter=' ',
+                            skiprows=[0], error_bad_lines=False)
+        table = table.as_matrix(columns=table.columns)
+
+        # Toss nans:
+        table = table[np.logical_not(np.any(np.isnan(table), axis=1))]
+
+        n_walkers = len(np.unique(table[:, 0]))
+        n_accepted_steps = np.count_nonzero(table[:, 2] != 0)
+        n_steps_total = np.max(table[:, 2])
+        acceptance_rates = [n_accepted_steps / n_steps_total / n_walkers]
+
+        n_properties_per_spot = 3
+        col_offset = 4
+        n_spots = (table.shape[1] - col_offset) // n_properties_per_spot
+
+        chi2_col = 3
+        radius_col = (col_offset + n_properties_per_spot * np.arange(n_spots))
+        theta_col = (col_offset + 1 + n_properties_per_spot * np.arange(n_spots))
+        phi_col = (col_offset + 2 + n_properties_per_spot * np.arange(n_spots))
+
+        # Save flattened chains
+        radius = table[:, radius_col]
+        theta = table[:, theta_col]
+        phi = table[:, phi_col]
+        chi2 = table[:, chi2_col]
+
+        # Save un-flattened chains
+        radius_chains = []
+        theta_chains = []
+        phi_chains = []
+        chi2_chains = []
+
+        chain_inds = table[:, 0]
+        for i in range(n_walkers):
+            chain_i = chain_inds == i
+            radius_i = table[chain_i, :][:, radius_col]
+            theta_i = table[chain_i, :][:, theta_col]
+            phi_i = table[chain_i, :][:, phi_col]
+            chi2_i = table[chain_i, :][:, chi2_col]
+
+            radius_chains.append(radius_i)
+            theta_chains.append(theta_i)
+            phi_chains.append(phi_i)
+            chi2_chains.append(chi2_i)
+
+        burnin_int = int(burnin*table.shape[0])
+
+        # last_lc = load_best_light_curve(results_dir, window_ind, transit_params)
+
+
+        times, fluxes, errors = np.loadtxt(lc_path, unpack=True)
+
+        ## calculate best transit model
+        min_chi2_chain = [min(chi2) for chi2 in chi2_chains]
+        best_chain_index = np.argmin(min_chi2_chain)
+        best_step_index_of_best_chain = np.argmin(chi2_chains[best_chain_index])
+
+        spot_params = chains_to_spot_params(radius_chains, theta_chains,
+                                            phi_chains, best_chain_index,
+                                            best_step_index_of_best_chain)
+        stsp = STSP(LightCurve(times=times, fluxes=fluxes, errors=errors),
+                    transit_params, spot_params)
+        t, f = stsp.stsp_lc(t_bypass=True)
+
+        last_lc = BestLightCurve(times=times, fluxes_kepler=fluxes, errors=errors, fluxes_model=f)
+
+
+        kwargs = dict(burnin=burnin, acceptance_rates=acceptance_rates,
+                      radius=radius, theta=theta, phi=phi, n_spots=n_spots,
+                      window_ind=window_ind, transit_params=transit_params,
+                      chi2=chi2, light_curve=last_lc,
+                      radius_chains=radius_chains, theta_chains=theta_chains,
+                      phi_chains=phi_chains, chi2_chains=chi2_chains,
+                      spot_params=spot_params)
+
+        return cls(**kwargs)
+
 
 
     # @property
